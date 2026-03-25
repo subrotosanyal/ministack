@@ -782,12 +782,11 @@ def _describe_tasks(data):
     for ref in task_refs:
         task = _resolve_task(ref, cluster_name)
         if task:
+            _maybe_mark_stopped(task)
             t = _sanitize(task)
             if "TAGS" in include:
                 t["tags"] = _tags.get(task["taskArn"], [])
             result.append(t)
-            _maybe_mark_stopped(task)
-            result.append({k: v for k, v in task.items() if not k.startswith("_")})
         else:
             arn = ref if ref.startswith("arn:") else \
                 f"arn:aws:ecs:{REGION}:{ACCOUNT_ID}:task/{cluster_name}/{ref}"

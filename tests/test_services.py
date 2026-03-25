@@ -6,8 +6,17 @@ Requires: pip install boto3 pytest
 
 import io
 import json
+import os
 import time
 import zipfile
+from urllib.parse import urlparse
+
+import pytest
+from botocore.exceptions import ClientError
+
+# Derive execute-api port from MINISTACK_ENDPOINT so Docker runs work
+_endpoint = os.environ.get("MINISTACK_ENDPOINT", "http://localhost:4566")
+_EXECUTE_PORT = urlparse(_endpoint).port or 4566
 
 import pytest
 from botocore.exceptions import ClientError
@@ -105,6 +114,12 @@ def test_s3_delete_object_idempotent(s3):
     resp = s3.delete_object(Bucket="intg-s3-delidempotent", Key="nonexistent.txt")
     assert resp["ResponseMetadata"]["HTTPStatusCode"] == 204
 
+def test_s3_delete_object(s3):
+    s3.create_bucket(Bucket="intg-s3-delobj")
+    s3.put_object(Bucket="intg-s3-delobj", Key="bye.txt", Body=b"bye")
+    s3.delete_object(Bucket="intg-s3-delobj", Key="bye.txt")
+    with pytest.raises(ClientError):
+        s3.get_object(Bucket="intg-s3-delobj", Key="bye.txt")
 
 def test_s3_copy_object(s3):
     s3.create_bucket(Bucket="intg-s3-copysrc")
@@ -353,6 +368,33 @@ def test_sqs_list_queues(sqs):
     assert any("intg-sqs-list-alpha" in u for u in urls)
     assert any("intg-sqs-list-beta" in u for u in urls)
 
+def test_sqs_create_queue(sqs):
+    resp = sqs.create_queue(QueueName="intg-sqs-create")
+    assert "QueueUrl" in resp
+    assert "intg-sqs-create" in resp["QueueUrl"]
+
+
+def test_sqs_delete_queue(sqs):
+    url = sqs.create_queue(QueueName="intg-sqs-delete")["QueueUrl"]
+    sqs.delete_queue(QueueUrl=url)
+    with pytest.raises(ClientError):
+        sqs.get_queue_attributes(QueueUrl=url, AttributeNames=["All"])
+
+
+def test_sqs_list_queues(sqs):
+    sqs.create_queue(QueueName="intg-sqs-list-alpha")
+    sqs.create_queue(QueueName="intg-sqs-list-beta")
+    resp = sqs.list_queues(QueueNamePrefix="intg-sqs-list-")
+    urls = resp.get("QueueUrls", [])
+    assert len(urls) >= 2
+    assert any("intg-sqs-list-alpha" in u for u in urls)
+    assert any("intg-sqs-list-beta" in u for u in urls)
+
+
+def test_sqs_get_queue_url(sqs):
+    sqs.create_queue(QueueName="intg-sqs-geturl")
+    resp = sqs.get_queue_url(QueueName="intg-sqs-geturl")
+    assert "intg-sqs-geturl" in resp["QueueUrl"]
 
 def test_sqs_get_queue_url(sqs):
     sqs.create_queue(QueueName="intg-sqs-geturl")
@@ -4879,9 +4921,9 @@ def test_lambda_warm_start(lam, apigw):
 
     def call():
         req = _urlreq.Request(
-            f"http://{api_id}.execute-api.localhost:4566/$default/ping", method="GET"
+            f"http://{api_id}.execute-api.localhost:{_EXECUTE_PORT}/$default/ping", method="GET"
         )
-        req.add_header("Host", f"{api_id}.execute-api.localhost:4566")
+        req.add_header("Host", f"{api_id}.execute-api.localhost:{_EXECUTE_PORT}")
         return _urlreq.urlopen(req).read().decode()
 
     t1 = call()  # cold start — spawns worker, imports module
@@ -4936,9 +4978,9 @@ def test_apigw_execute_lambda_proxy(apigw, lam):
     )["RouteId"]
     apigw.create_stage(ApiId=api_id, StageName="$default")
 
-    url = f"http://{api_id}.execute-api.localhost:4566/$default/hello"
+    url = f"http://{api_id}.execute-api.localhost:{_EXECUTE_PORT}/$default/hello"
     req = _urlreq.Request(url, method="GET")
-    req.add_header("Host", f"{api_id}.execute-api.localhost:4566")
+    req.add_header("Host", f"{api_id}.execute-api.localhost:{_EXECUTE_PORT}")
     resp = _urlreq.urlopen(req)
     assert resp.status == 200
     body = json.loads(resp.read())
@@ -4958,9 +5000,9 @@ def test_apigw_execute_no_route(apigw):
 
     api_id = apigw.create_api(Name="no-route-api", ProtocolType="HTTP")["ApiId"]
     apigw.create_stage(ApiId=api_id, StageName="$default")
-    url = f"http://{api_id}.execute-api.localhost:4566/$default/nonexistent"
+    url = f"http://{api_id}.execute-api.localhost:{_EXECUTE_PORT}/$default/nonexistent"
     req = _urlreq.Request(url, method="GET")
-    req.add_header("Host", f"{api_id}.execute-api.localhost:4566")
+    req.add_header("Host", f"{api_id}.execute-api.localhost:{_EXECUTE_PORT}")
     try:
         _urlreq.urlopen(req)
         assert False, "Expected 404"
@@ -4993,9 +5035,9 @@ def test_apigw_execute_default_route(apigw, lam):
     apigw.create_route(ApiId=api_id, RouteKey="$default", Target=f"integrations/{int_id}")
     apigw.create_stage(ApiId=api_id, StageName="$default")
 
-    url = f"http://{api_id}.execute-api.localhost:4566/$default/any/path/here"
+    url = f"http://{api_id}.execute-api.localhost:{_EXECUTE_PORT}/$default/any/path/here"
     req = _urlreq.Request(url, method="POST")
-    req.add_header("Host", f"{api_id}.execute-api.localhost:4566")
+    req.add_header("Host", f"{api_id}.execute-api.localhost:{_EXECUTE_PORT}")
     resp = _urlreq.urlopen(req)
     assert resp.status == 200
 
@@ -5087,9 +5129,9 @@ def test_apigw_path_param_route(apigw, lam):
     apigw.create_route(ApiId=api_id, RouteKey="GET /items/{id}", Target=f"integrations/{int_id}")
     apigw.create_stage(ApiId=api_id, StageName="$default")
 
-    url = f"http://{api_id}.execute-api.localhost:4566/$default/items/abc123"
+    url = f"http://{api_id}.execute-api.localhost:{_EXECUTE_PORT}/$default/items/abc123"
     req = _urlreq.Request(url, method="GET")
-    req.add_header("Host", f"{api_id}.execute-api.localhost:4566")
+    req.add_header("Host", f"{api_id}.execute-api.localhost:{_EXECUTE_PORT}")
     resp = _urlreq.urlopen(req)
     assert resp.status == 200
     body = json.loads(resp.read())
@@ -5119,9 +5161,9 @@ def test_apigw_greedy_path_param(apigw, lam):
     apigw.create_stage(ApiId=api_id, StageName="$default")
 
     # Path with multiple segments should match {proxy+}
-    url = f"http://{api_id}.execute-api.localhost:4566/$default/files/a/b/c"
+    url = f"http://{api_id}.execute-api.localhost:{_EXECUTE_PORT}/$default/files/a/b/c"
     req = _urlreq.Request(url, method="GET")
-    req.add_header("Host", f"{api_id}.execute-api.localhost:4566")
+    req.add_header("Host", f"{api_id}.execute-api.localhost:{_EXECUTE_PORT}")
     resp = _urlreq.urlopen(req)
     assert resp.status == 200
     # handler returns rawPath as body string
@@ -5188,9 +5230,9 @@ def test_apigw_routekey_in_lambda_event(apigw, lam):
     apigw.create_route(ApiId=api_id, RouteKey="GET /ping", Target=f"integrations/{int_id}")
     apigw.create_stage(ApiId=api_id, StageName="$default")
 
-    url = f"http://{api_id}.execute-api.localhost:4566/$default/ping"
+    url = f"http://{api_id}.execute-api.localhost:{_EXECUTE_PORT}/$default/ping"
     req = _urlreq.Request(url, method="GET")
-    req.add_header("Host", f"{api_id}.execute-api.localhost:4566")
+    req.add_header("Host", f"{api_id}.execute-api.localhost:{_EXECUTE_PORT}")
     resp = _urlreq.urlopen(req)
     assert resp.status == 200
     assert resp.read().decode() == "GET /ping"
